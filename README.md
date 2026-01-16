@@ -1,6 +1,6 @@
 # GPT Prompt Library
 
-<video src="demo.mp4" controls autoplay loop muted style="max-width: 100%; border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,.07);"></video>
+https://github.com/user-attachments/assets/e0ae1c58-85ec-43c0-a16e-c912bf339d16
 
 A lightweight Chrome extension that adds a prompt library directly inside the ChatGPT UI. Save, search, and inject prompts in one click—right from a sidebar that lives next to your chats.
 
