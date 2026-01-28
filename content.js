@@ -11,6 +11,8 @@
   }
 
   const $ = (sel, root = document) => root.querySelector(sel)
+  let outsideListenerActive = false
+  let storageListenerActive = false
 
   const uuid = () => {
     if (crypto && typeof crypto.randomUUID === 'function') {
@@ -40,6 +42,24 @@
     new Promise(resolve => {
       chrome.storage.local.set({ [STORAGE_KEY]: prompts }, () => resolve())
     })
+
+  const updatePrompts = async updater => {
+    const latest = await loadPrompts()
+    const next = updater(Array.isArray(latest) ? latest : [])
+    state.prompts = next
+    await savePrompts(next)
+    renderPrompts()
+  }
+
+  const handleStorageChange = (changes, areaName) => {
+    if (areaName !== 'local') return
+    if (!changes[STORAGE_KEY]) return
+    const next = Array.isArray(changes[STORAGE_KEY].newValue)
+      ? changes[STORAGE_KEY].newValue
+      : []
+    state.prompts = next
+    renderPrompts()
+  }
 
   const getSidebarAnchor = () => {
     const codexLink = document.querySelector(
@@ -149,9 +169,35 @@
         </div>
 
         <footer class="gpl-footer">
+          <div class="gpl-footer-links">
+            <button class="gpl-link" type="button" data-action="export">Export</button>
+            <button class="gpl-link" type="button" data-action="import">Import</button>
+          </div>
           <button class="gpl-primary" data-action="add">Add a new prompt</button>
           <p class="gpl-footer-note">Stored locally in your browser.</p>
         </footer>
+
+        <div class="gpl-import" hidden>
+          <div class="gpl-import-card">
+            <header class="gpl-import-header">
+              <div>
+                <p class="gpl-import-eyebrow">Import prompts</p>
+                <h3 class="gpl-import-title">Paste your JSON export</h3>
+              </div>
+              <button class="gpl-icon-btn" data-action="import-cancel" aria-label="Close import">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+                  <path d="M6 6l12 12"></path>
+                  <path d="M18 6l-12 12"></path>
+                </svg>
+              </button>
+            </header>
+            <textarea class="gpl-import-textarea" rows="8" placeholder="Paste the JSON export here"></textarea>
+            <div class="gpl-import-actions">
+              <button class="gpl-secondary" type="button" data-action="import-cancel">Cancel</button>
+              <button class="gpl-primary" type="button" data-action="import-confirm">Import prompts</button>
+            </div>
+          </div>
+        </div>
       </aside>
 
       <div class="gpl-toast" aria-live="polite" hidden></div>
@@ -167,6 +213,50 @@
     if (!root) return
     root.dataset.open = state.isOpen ? 'true' : 'false'
     document.body.classList.toggle('gpl-open', state.isOpen)
+    if (state.isOpen) {
+      enableOutsideClose()
+    } else {
+      disableOutsideClose()
+      setImportState(false)
+    }
+  }
+
+  const setImportState = open => {
+    const root = $('#' + APP_ID)
+    if (!root) return
+    const importView = $('.gpl-import', root)
+    const textarea = $('.gpl-import-textarea', root)
+    if (!importView || !textarea) return
+    importView.hidden = !open
+    if (open) {
+      textarea.value = ''
+      textarea.focus()
+    }
+  }
+
+  const handleOutsidePointer = event => {
+    if (!state.isOpen) return
+    const root = $('#' + APP_ID)
+    if (!root) return
+    const panel = $('.gpl-panel', root)
+    const toggle = $('#' + TOGGLE_ID)
+    if (panel && panel.contains(event.target)) return
+    if (toggle && toggle.contains(event.target)) return
+    state.isOpen = false
+    updateOpenState()
+    setEditorState(false)
+  }
+
+  const enableOutsideClose = () => {
+    if (outsideListenerActive) return
+    document.addEventListener('pointerdown', handleOutsidePointer)
+    outsideListenerActive = true
+  }
+
+  const disableOutsideClose = () => {
+    if (!outsideListenerActive) return
+    document.removeEventListener('pointerdown', handleOutsidePointer)
+    outsideListenerActive = false
   }
 
   const setEditorState = (open, prompt = null) => {
@@ -267,13 +357,15 @@
       return
     }
 
-    input.focus()
-    try {
-      document.execCommand('selectAll', false, null)
-      document.execCommand('delete', false, null)
-    } catch (err) {
-      // Best effort only; continue to insert.
+    if (document.activeElement !== input) {
+      input.focus()
     }
+    // try {
+    //   document.execCommand('selectAll', false, null)
+    //   document.execCommand('delete', false, null)
+    // } catch (err) {
+    //   // Best effort only; continue to insert.
+    // }
 
     const lines = content.split(/\n/)
     lines.forEach((line, index) => {
@@ -298,10 +390,92 @@
       return
     }
 
+    if (action === 'export') {
+      const exportData = JSON.stringify(state.prompts, null, 2)
+      const blob = new Blob([exportData], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      const dateStamp = new Date().toISOString().slice(0, 10)
+      link.href = url
+      link.download = `gpt-prompt-library-${dateStamp}.json`
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      URL.revokeObjectURL(url)
+      showToast('Prompt library exported.', 'success')
+      return
+    }
+
+    if (action === 'import') {
+      setImportState(true)
+      return
+    }
+
+    if (action === 'import-cancel') {
+      setImportState(false)
+      return
+    }
+
+    if (action === 'import-confirm') {
+      const root = $('#' + APP_ID)
+      if (!root) return
+      const textarea = $('.gpl-import-textarea', root)
+      if (!textarea) return
+      const raw = textarea.value.trim()
+      if (!raw) {
+        showToast('Paste a JSON export to import prompts.', 'error')
+        return
+      }
+
+      let parsed
+      try {
+        parsed = JSON.parse(raw)
+      } catch (error) {
+        showToast('Invalid JSON. Please paste a valid export file.', 'error')
+        return
+      }
+
+      const list = Array.isArray(parsed)
+        ? parsed
+        : Array.isArray(parsed?.prompts)
+          ? parsed.prompts
+          : null
+
+      if (!list) {
+        showToast('JSON should be an array of prompts.', 'error')
+        return
+      }
+
+      const normalized = list
+        .map(item => {
+          if (!item || typeof item !== 'object') return null
+          const name = String(item.name || '').trim()
+          const content = String(item.content || '')
+          if (!name || !content.trim()) return null
+          const id = typeof item.id === 'string' && item.id ? item.id : uuid()
+          return { id, name, content }
+        })
+        .filter(Boolean)
+
+      if (!normalized.length) {
+        showToast('No valid prompts found in the JSON.', 'error')
+        return
+      }
+
+      state.prompts = normalized
+      await savePrompts(state.prompts)
+      setEditorState(false)
+      setImportState(false)
+      renderPrompts()
+      showToast(`Imported ${normalized.length} prompts.`, 'success')
+      return
+    }
+
     if (action === 'close') {
       state.isOpen = false
       updateOpenState()
       setEditorState(false)
+      setImportState(false)
       return
     }
 
@@ -328,9 +502,7 @@
     if (action === 'delete') {
       const confirmed = window.confirm(`Delete "${prompt.name}"?`)
       if (!confirmed) return
-      state.prompts = state.prompts.filter(item => item.id !== promptId)
-      await savePrompts(state.prompts)
-      renderPrompts()
+      await updatePrompts(latest => latest.filter(item => item.id !== promptId))
     }
   }
 
@@ -363,27 +535,31 @@
       }
 
       if (state.editingId) {
-        state.prompts = state.prompts.map(prompt =>
-          prompt.id === state.editingId ? { ...prompt, name, content } : prompt
+        await updatePrompts(latest =>
+          latest.map(prompt =>
+            prompt.id === state.editingId ? { ...prompt, name, content } : prompt
+          )
         )
       } else {
-        state.prompts = [
+        await updatePrompts(latest => [
           {
             id: uuid(),
             name,
             content
           },
-          ...state.prompts
-        ]
+          ...latest
+        ])
       }
-
-      await savePrompts(state.prompts)
       setEditorState(false)
-      renderPrompts()
     })
 
     document.addEventListener('keydown', event => {
       if (event.key === 'Escape') {
+        const importView = $('.gpl-import', root)
+        if (importView && !importView.hidden) {
+          setImportState(false)
+          return
+        }
         const editorView = $('.gpl-editor', root)
         if (editorView && !editorView.hidden) {
           setEditorState(false)
@@ -404,6 +580,11 @@
     state.prompts = await loadPrompts()
     renderPrompts()
     updateOpenState()
+
+    if (!storageListenerActive) {
+      chrome.storage.onChanged.addListener(handleStorageChange)
+      storageListenerActive = true
+    }
   }
 
   const observe = () => {
